@@ -14,6 +14,16 @@ import (
 	"github.com/cli/go-gh/pkg/api"
 )
 
+/*
+
+For friday:
+
+- actually grab room info at the top of the loop for RenderRoom to work with
+- PoC flavor system
+- Parsing for targeted commands (going through a door, examining a file)
+
+*/
+
 type IOStreams struct {
 	In  io.Reader
 	Out io.Writer
