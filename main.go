@@ -39,11 +39,12 @@ type Opts struct {
 type Contents struct {
 	Files []FileResponse
 	Dirs  []string
+	SHA   string
 }
 
 type ContentGetter interface {
-	GetDirContents(path string) (Contents, error)
-	GetFileContents(path string) (FileResponse, error)
+	GetDirContents(path string, ref string) (Contents, error)
+	GetFileContents(path string, ref string) (FileResponse, error)
 }
 
 type RESTContentGetter struct {
@@ -61,14 +62,15 @@ func NewRESTContentGetter(client api.RESTClient, repo string) *RESTContentGetter
 type FileResponse struct {
 	Type string
 	Name string
+	SHA  string `json:"sha"`
 }
 
-func (g *RESTContentGetter) GetFileContents(path string) (resp FileResponse, err error) {
+func (g *RESTContentGetter) GetFileContents(path, ref string) (resp FileResponse, err error) {
 	err = g.client.Get(fmt.Sprintf("repos/%s/contents/%s", g.repo, path), &resp)
 	return
 }
 
-func (g *RESTContentGetter) GetDirContents(path string) (c Contents, err error) {
+func (g *RESTContentGetter) GetDirContents(path, ref string) (c Contents, err error) {
 	c = Contents{
 		Files: []FileResponse{},
 		Dirs:  []string{},
@@ -86,6 +88,8 @@ func (g *RESTContentGetter) GetDirContents(path string) (c Contents, err error) 
 		}
 	}
 
+	// TODO handle SHA
+
 	return
 }
 
@@ -100,7 +104,7 @@ func _main(opts *Opts) error {
 
 	var cmd Command
 	var err error
-	contents, err := g.GetDirContents(state.Path)
+	contents, err := g.GetDirContents(state.Path, "")
 	if err != nil {
 		panic("TODO handle this")
 	}
@@ -109,6 +113,12 @@ func _main(opts *Opts) error {
 	fmt.Fprintln(out, state.RenderRoom())
 
 	for {
+		contents, err := g.GetDirContents(state.Path, "")
+		if err != nil {
+			panic("TODO handle this")
+		}
+		state.Contents = contents
+		state.SHA = contents.SHA
 		cmd, err = repl.NextCommand()
 		if err != nil {
 			if uce, ok := err.(*UnknownCommandError); ok {
@@ -124,6 +134,19 @@ func _main(opts *Opts) error {
 
 		if cmd.Kind == LookCommand {
 			fmt.Fprintln(out, state.RenderRoom())
+		}
+
+		if cmd.Kind == ShiftCommand {
+			switch cmd.Args[0] {
+			case "back":
+				fmt.Fprintf(out, "you close your eyes and focus on the past. you feel as though things have changed around you.")
+				state.ReverseSHA()
+			case "forward":
+				fmt.Fprintf(out, "you close your eyes and focus on the future. you feel as though things have changed around you.")
+				state.ForwardSHA()
+			default:
+				panic("you shouldn't be here")
+			}
 		}
 
 		if cmd.Kind == GoCommand {
@@ -208,6 +231,7 @@ const (
 	QuitCommand    CommandKind = "quit"
 	HelpCommand    CommandKind = "help"
 	ExamineCommand CommandKind = "examine"
+	ShiftCommand   CommandKind = "shift"
 )
 
 func (r *IOREPL) GoDown(doors []string) (string, error) {
@@ -304,6 +328,26 @@ func parseCommand(raw string) (cmd Command, err error) {
 				Args: []string{split[1]},
 			}
 		}
+	} else if strings.HasPrefix(raw, "shift") {
+		split := strings.Split(raw, " ")
+		if len(split) != 2 {
+			err = &UnknownCommandError{
+				Raw:  raw,
+				Hint: "try 'shift back' or 'shift forward'",
+			}
+		} else {
+			if split[1] != "back" && split[1] != "forward" {
+				err = &UnknownCommandError{
+					Raw:  raw,
+					Hint: "try 'shift back' or 'shift forward'",
+				}
+			}
+			cmd = Command{
+				Raw:  raw,
+				Kind: ShiftCommand,
+				Args: []string{split[1]},
+			}
+		}
 	} else if strings.HasPrefix(raw, "?") {
 		cmd = Command{
 			Raw:  raw,
@@ -323,6 +367,7 @@ type GameState struct {
 	Path      string
 	Contents  Contents
 	PathStack []string
+	SHA       string
 }
 
 const roomTmpl string = `
@@ -338,6 +383,14 @@ It smells of stale coffee, but you can find none to drink.
 {{ .UpDesc }}
 {{ .ItemsDesc }}
 `
+
+func (s *GameState) ReverseSHA() {
+
+}
+
+func (s *GameState) ForwardSHA() {
+
+}
 
 func (s *GameState) PopPath() {
 	s.PathStack = s.PathStack[0 : len(s.PathStack)-1]
