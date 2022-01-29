@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -93,6 +92,7 @@ func (g *RESTContentGetter) GetDirContents(path string) (c Contents, err error) 
 func _main(opts *Opts) error {
 	g := opts.Getter
 	repl := opts.REPL
+	out := opts.IO.Out
 
 	state := GameState{
 		Repo: opts.Repo,
@@ -106,48 +106,71 @@ func _main(opts *Opts) error {
 	}
 	state.Contents = contents
 
-	fmt.Fprintln(opts.IO.Out, state.RenderRoom())
+	fmt.Fprintln(out, state.RenderRoom())
 
 	for {
 		cmd, err = repl.NextCommand()
-		if err != nil && errors.Is(err, UnknownCommandError{}) {
-			fmt.Fprintln(opts.IO.Out, err.Error())
-			err = nil
-			continue
-		} else if err != nil {
-			break
+		if err != nil {
+			if uce, ok := err.(*UnknownCommandError); ok {
+				fmt.Fprintln(out, uce.Error())
+				if uce.Hint != "" {
+					fmt.Fprintf(out, "hint: %s\n", uce.Hint)
+				}
+				continue
+			} else {
+				break
+			}
 		}
 
 		if cmd.Kind == LookCommand {
-			fmt.Fprintln(opts.IO.Out, state.RenderRoom())
+			fmt.Fprintln(out, state.RenderRoom())
+		}
+
+		if cmd.Kind == GoCommand {
+			switch cmd.Args[0] {
+			case "up":
+				if state.Path == "" {
+					fmt.Fprintf(out, "you search the walls for a door out but can't find out.")
+				} else {
+					fmt.Fprintln(out, "you open the door and follow a spiral staircase up to a previous level.")
+					state.PopPath()
+				}
+			case "down":
+				which, err := repl.GoDown(state.Contents.Dirs)
+				if err != nil {
+					return err
+				}
+				state.PushPath(which)
+			default:
+				panic("should not get here, yo")
+			}
 		}
 
 		if cmd.Kind == ExamineCommand {
 			if len(state.Contents.Files) == 0 {
-				fmt.Fprintln(opts.IO.Out, "you don't see anything to examine in here")
+				fmt.Fprintln(out, "you don't see anything to examine in here")
 			} else {
 				var which FileResponse
 				which, err = repl.ExamineWhich(state.Contents.Files)
 				if err != nil {
 					break
 				}
-				fmt.Fprintf(opts.IO.Out, "you are holding a paper titled %s.", which.Name)
+				fmt.Fprintf(out, "you are holding a paper titled %s.", which.Name)
 
 				// TODO do a confirm then open a pager
 			}
 		}
 
 		if cmd.Kind == QuitCommand {
-			fmt.Fprintln(opts.IO.Out, "see you again~")
+			fmt.Fprintln(out, "see you again~")
 			break
 		}
 
 		if cmd.Kind == HelpCommand {
-			fmt.Fprintln(opts.IO.Out, "supported verbs: look, go, examine, quit")
+			fmt.Fprintln(out, "supported verbs: look, go, examine, quit")
 		}
 	}
 
-	// TODO fill in Contents struct as needed
 	// TODO hash functions for repo names and file names
 
 	return err
@@ -164,6 +187,7 @@ type Command struct {
 type REPL interface {
 	NextCommand() (Command, error)
 	ExamineWhich(files []FileResponse) (FileResponse, error)
+	GoDown(dirs []string) (string, error)
 }
 
 type IOREPL struct {
@@ -185,6 +209,23 @@ const (
 	HelpCommand    CommandKind = "help"
 	ExamineCommand CommandKind = "examine"
 )
+
+func (r *IOREPL) GoDown(doors []string) (string, error) {
+	out := r.io.Out
+	fmt.Fprintln(out, "you open the door.")
+	fmt.Fprintln(out, "before you is a dim, spiraling staircase going down.")
+	fmt.Fprintln(out, "as you descend, doors emerge from the darkness at regular intervals upon small landings.")
+
+	var selected int
+	if err := survey.AskOne(&survey.Select{
+		Message: "at which door will you stop?",
+		Options: doors,
+	}, &selected); err != nil {
+		return "", err
+	}
+
+	return doors[selected], nil
+}
 
 func (r *IOREPL) ExamineWhich(files []FileResponse) (FileResponse, error) {
 	opts := []string{}
@@ -209,7 +250,7 @@ func (r *IOREPL) ExamineWhich(files []FileResponse) (FileResponse, error) {
 func (r *IOREPL) NextCommand() (cmd Command, err error) {
 	raw := ""
 	if err = survey.AskOne(&survey.Input{
-		Message: "for help >",
+		Message: ">",
 	}, &raw); err != nil {
 		return
 	}
@@ -218,8 +259,12 @@ func (r *IOREPL) NextCommand() (cmd Command, err error) {
 }
 
 type UnknownCommandError struct {
-	error
-	Raw string
+	Raw  string
+	Hint string
+}
+
+func (e *UnknownCommandError) Error() string {
+	return "i did not understand :( supported verbs: look, go, examine, quit"
 }
 
 func parseCommand(raw string) (cmd Command, err error) {
@@ -234,24 +279,38 @@ func parseCommand(raw string) (cmd Command, err error) {
 			Raw:  raw,
 			Kind: ExamineCommand,
 		}
-	} else if strings.HasPrefix(raw, "quit") {
+	} else if strings.HasPrefix(raw, "quit") || raw == "q" {
 		cmd = Command{
 			Raw:  raw,
 			Kind: QuitCommand,
 		}
 	} else if strings.HasPrefix(raw, "go") {
-		cmd = Command{
-			Raw:  raw,
-			Kind: GoCommand,
+		split := strings.Split(raw, " ")
+		if len(split) != 2 {
+			err = &UnknownCommandError{
+				Raw:  raw,
+				Hint: "try 'go down' or 'go up'",
+			}
+		} else {
+			if split[1] != "down" && split[1] != "up" {
+				err = &UnknownCommandError{
+					Raw:  raw,
+					Hint: "try 'go down' or 'go up'",
+				}
+			}
+			cmd = Command{
+				Raw:  raw,
+				Kind: GoCommand,
+				Args: []string{split[1]},
+			}
 		}
 	} else if strings.HasPrefix(raw, "?") {
 		cmd = Command{
 			Raw:  raw,
 			Kind: HelpCommand,
 		}
-
 	} else {
-		err = UnknownCommandError{
+		err = &UnknownCommandError{
 			Raw: raw,
 		}
 	}
@@ -260,34 +319,51 @@ func parseCommand(raw string) (cmd Command, err error) {
 }
 
 type GameState struct {
-	Repo     string
-	Path     string
-	Contents Contents
+	Repo      string
+	Path      string
+	Contents  Contents
+	PathStack []string
 }
 
 const roomTmpl string = `
-You are standing in a room. {{ .RoomDescription }}
+You are standing in a room of plain construction. There is a drop ceiling above you with scattered flourescent lighting.
+
+It smells of stale coffee, but you can find none to drink.
+
+{{ .RoomDescription }}
 
 {{ .RoomFlavor }}
 
+{{ .DownDesc }}
+{{ .UpDesc }}
 {{ .ItemsDesc }}
 `
 
-// TODO hallway rendering
+func (s *GameState) PopPath() {
+	s.PathStack = s.PathStack[0 : len(s.PathStack)-1]
+	if len(s.PathStack) == 0 {
+		s.Path = ""
+	} else {
+		s.Path = s.PathStack[len(s.PathStack)-1]
+	}
+}
+
+func (s *GameState) PushPath(path string) {
+	s.PathStack = append(s.PathStack, path)
+	s.Path = s.Path + "/" + path
+}
 
 func (s *GameState) RenderRoom() string {
-	// TODO pay attention to Path
-	// TODO render door
-	// TODO special handling for root room?
-	// TODO objects on ground rendering
 	tmpl, err := template.New("room").Parse(roomTmpl)
 	if err != nil {
 		panic(err.Error())
 	}
 	out := &bytes.Buffer{}
-	desc := "A sign reads %s"
+	desc := ""
 	if s.Path == "" {
-		desc = fmt.Sprintf("A sign reads %s", s.Repo)
+		desc = fmt.Sprintf("A sign reads '%s'", s.Repo)
+	} else {
+		desc = fmt.Sprintf("A sign reads '%s'", s.PathStack[len(s.PathStack)-1])
 	}
 
 	itemsDesc := ""
@@ -295,14 +371,28 @@ func (s *GameState) RenderRoom() string {
 		itemsDesc = "there are pieces of paper strewn about the floor."
 	}
 
+	var downDesc string
+	if len(s.Contents.Dirs) > 0 {
+		downDesc = "there is a door marked with a staircase and a down arrow along one wall."
+	}
+
+	var upDesc string
+	if s.Path != "" {
+		upDesc = "there is a door marked with a staircase and an up arrow along one wall."
+	}
+
 	err = tmpl.Execute(out, struct {
 		RoomDescription string
 		RoomFlavor      string
 		ItemsDesc       string
+		DownDesc        string
+		UpDesc          string
 	}{
 		RoomDescription: desc,
-		RoomFlavor:      "TODO ROOM FLAVOR",
+		RoomFlavor:      "dust motes float through the air.",
 		ItemsDesc:       itemsDesc,
+		DownDesc:        downDesc,
+		UpDesc:          upDesc,
 	})
 	if err != nil {
 		panic(err.Error())
