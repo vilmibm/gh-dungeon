@@ -38,11 +38,13 @@ type Opts struct {
 }
 
 type Contents struct {
-	// TODO
+	Files []FileResponse
+	Dirs  []string
 }
 
 type ContentGetter interface {
-	GetPathContents(path string) (Contents, error)
+	GetDirContents(path string) (Contents, error)
+	GetFileContents(path string) (FileResponse, error)
 }
 
 type RESTContentGetter struct {
@@ -57,27 +59,56 @@ func NewRESTContentGetter(client api.RESTClient, repo string) *RESTContentGetter
 	}
 }
 
-func (g *RESTContentGetter) GetPathContents(path string) (Contents, error) {
-	// TODO
-	return Contents{}, nil
+type FileResponse struct {
+	Type string
+	Name string
+}
+
+func (g *RESTContentGetter) GetFileContents(path string) (resp FileResponse, err error) {
+	err = g.client.Get(fmt.Sprintf("repos/%s/contents/%s", g.repo, path), &resp)
+	return
+}
+
+func (g *RESTContentGetter) GetDirContents(path string) (c Contents, err error) {
+	c = Contents{
+		Files: []FileResponse{},
+		Dirs:  []string{},
+	}
+	var resp []FileResponse
+	if err = g.client.Get(fmt.Sprintf("repos/%s/contents/%s", g.repo, path), &resp); err != nil {
+		return
+	}
+
+	for _, entry := range resp {
+		if entry.Type == "file" {
+			c.Files = append(c.Files, entry)
+		} else if entry.Type == "dir" {
+			c.Dirs = append(c.Dirs, entry.Name)
+		}
+	}
+
+	return
 }
 
 func _main(opts *Opts) error {
 	g := opts.Getter
 	repl := opts.REPL
 
-	state := GameState{}
-
-	contents, err := g.GetPathContents("")
-	if err != nil {
-		return err
+	state := GameState{
+		Repo: opts.Repo,
 	}
-	fmt.Printf("DBG %#v\n", contents)
 
 	var cmd Command
+	var err error
+	contents, err := g.GetDirContents(state.Path)
+	if err != nil {
+		panic("TODO handle this")
+	}
+	state.Contents = contents
+
+	fmt.Fprintln(opts.IO.Out, state.RenderRoom())
 
 	for {
-		fmt.Fprintln(opts.IO.Out, state.RenderRoom())
 		cmd, err = repl.NextCommand()
 		if err != nil && errors.Is(err, UnknownCommandError{}) {
 			fmt.Fprintln(opts.IO.Out, err.Error())
@@ -85,6 +116,25 @@ func _main(opts *Opts) error {
 			continue
 		} else if err != nil {
 			break
+		}
+
+		if cmd.Kind == LookCommand {
+			fmt.Fprintln(opts.IO.Out, state.RenderRoom())
+		}
+
+		if cmd.Kind == ExamineCommand {
+			if len(state.Contents.Files) == 0 {
+				fmt.Fprintln(opts.IO.Out, "you don't see anything to examine in here")
+			} else {
+				var which FileResponse
+				which, err = repl.ExamineWhich(state.Contents.Files)
+				if err != nil {
+					break
+				}
+				fmt.Fprintf(opts.IO.Out, "you are holding a paper titled %s.", which.Name)
+
+				// TODO do a confirm then open a pager
+			}
 		}
 
 		if cmd.Kind == QuitCommand {
@@ -113,6 +163,7 @@ type Command struct {
 
 type REPL interface {
 	NextCommand() (Command, error)
+	ExamineWhich(files []FileResponse) (FileResponse, error)
 }
 
 type IOREPL struct {
@@ -128,11 +179,32 @@ func NewIOREPL(io *IOStreams) *IOREPL {
 }
 
 const (
-	LookCommand CommandKind = "look"
-	GoCommand   CommandKind = "go"
-	QuitCommand CommandKind = "quit"
-	HelpCommand CommandKind = "help"
+	LookCommand    CommandKind = "look"
+	GoCommand      CommandKind = "go"
+	QuitCommand    CommandKind = "quit"
+	HelpCommand    CommandKind = "help"
+	ExamineCommand CommandKind = "examine"
 )
+
+func (r *IOREPL) ExamineWhich(files []FileResponse) (FileResponse, error) {
+	opts := []string{}
+	for _, f := range files {
+		opts = append(opts, f.Name)
+	}
+
+	fmt.Fprintln(r.io.Out, "you gather up the papers and look at their titles.")
+
+	var selected int
+	if err := survey.AskOne(&survey.Select{
+		Message: "examine which paper?",
+		Options: opts,
+	}, &selected); err != nil {
+		return FileResponse{}, err
+	}
+
+	return files[selected], nil
+
+}
 
 func (r *IOREPL) NextCommand() (cmd Command, err error) {
 	raw := ""
@@ -156,6 +228,11 @@ func parseCommand(raw string) (cmd Command, err error) {
 		cmd = Command{
 			Raw:  raw,
 			Kind: LookCommand,
+		}
+	} else if strings.HasPrefix(raw, "examine") {
+		cmd = Command{
+			Raw:  raw,
+			Kind: ExamineCommand,
 		}
 	} else if strings.HasPrefix(raw, "quit") {
 		cmd = Command{
@@ -183,13 +260,17 @@ func parseCommand(raw string) (cmd Command, err error) {
 }
 
 type GameState struct {
-	Path string
+	Repo     string
+	Path     string
+	Contents Contents
 }
 
 const roomTmpl string = `
 You are standing in a room. {{ .RoomDescription }}
 
 {{ .RoomFlavor }}
+
+{{ .ItemsDesc }}
 `
 
 // TODO hallway rendering
@@ -204,14 +285,25 @@ func (s *GameState) RenderRoom() string {
 		panic(err.Error())
 	}
 	out := &bytes.Buffer{}
+	desc := "A sign reads %s"
+	if s.Path == "" {
+		desc = fmt.Sprintf("A sign reads %s", s.Repo)
+	}
+
+	itemsDesc := ""
+	if len(s.Contents.Files) > 0 {
+		itemsDesc = "there are pieces of paper strewn about the floor."
+	}
+
 	err = tmpl.Execute(out, struct {
 		RoomDescription string
 		RoomFlavor      string
+		ItemsDesc       string
 	}{
-		RoomDescription: "TODO ROOM DESC",
+		RoomDescription: desc,
 		RoomFlavor:      "TODO ROOM FLAVOR",
+		ItemsDesc:       itemsDesc,
 	})
-
 	if err != nil {
 		panic(err.Error())
 	}
