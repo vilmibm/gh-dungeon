@@ -2,8 +2,10 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"strings"
 	"text/template"
@@ -45,6 +47,7 @@ type Contents struct {
 type ContentGetter interface {
 	GetDirContents(path string, ref string) (Contents, error)
 	GetFileContents(path string, ref string) (FileResponse, error)
+	GetPrevSHA(path, ref string) (sha string, err error)
 }
 
 type RESTContentGetter struct {
@@ -59,6 +62,34 @@ func NewRESTContentGetter(client api.RESTClient, repo string) *RESTContentGetter
 	}
 }
 
+type CommitsResponse struct {
+	SHA string `json:"sha"`
+}
+
+func (g *RESTContentGetter) GetPrevSHA(path, ref string) (sha string, err error) {
+	vs := url.Values{}
+	vs.Set("path", path)
+	if sha != "" {
+		vs.Set("sha", sha)
+	}
+	u := fmt.Sprintf("repos/%s/commits?%s", g.repo, vs.Encode())
+	var resp []CommitsResponse
+	err = g.client.Get(u, &resp)
+	if err != nil {
+		return
+	}
+
+	if len(resp) < 1 {
+		// TODO custom error type
+		err = errors.New("no previous commit")
+		return
+	}
+
+	sha = resp[1].SHA
+
+	return
+}
+
 type FileResponse struct {
 	Type string
 	Name string
@@ -66,19 +97,35 @@ type FileResponse struct {
 }
 
 func (g *RESTContentGetter) GetFileContents(path, ref string) (resp FileResponse, err error) {
-	err = g.client.Get(fmt.Sprintf("repos/%s/contents/%s", g.repo, path), &resp)
+	query := ""
+	if ref != "" {
+		vs := url.Values{}
+		vs.Set("ref", ref)
+		query = "?" + vs.Encode()
+	}
+	u := fmt.Sprintf("repos/%s/contents/%s%s", g.repo, path, query)
+	err = g.client.Get(u, &resp)
 	return
 }
 
 func (g *RESTContentGetter) GetDirContents(path, ref string) (c Contents, err error) {
+	query := ""
+	if ref != "" {
+		vs := url.Values{}
+		vs.Set("ref", ref)
+		query = "?" + vs.Encode()
+	}
 	c = Contents{
 		Files: []FileResponse{},
 		Dirs:  []string{},
 	}
 	var resp []FileResponse
-	if err = g.client.Get(fmt.Sprintf("repos/%s/contents/%s", g.repo, path), &resp); err != nil {
+	u := fmt.Sprintf("repos/%s/contents/%s%s", g.repo, path, query)
+	if err = g.client.Get(u, &resp); err != nil {
 		return
 	}
+
+	// TODO handle error. if 404, kick user to "lost in time and space" scene then return to root.
 
 	for _, entry := range resp {
 		if entry.Type == "file" {
@@ -87,7 +134,6 @@ func (g *RESTContentGetter) GetDirContents(path, ref string) (c Contents, err er
 			c.Dirs = append(c.Dirs, entry.Name)
 		}
 	}
-
 	// TODO handle SHA
 
 	return
@@ -106,6 +152,7 @@ func _main(opts *Opts) error {
 	var err error
 	contents, err := g.GetDirContents(state.Path, "")
 	if err != nil {
+		fmt.Println(err)
 		panic("TODO handle this")
 	}
 	state.Contents = contents
@@ -113,12 +160,11 @@ func _main(opts *Opts) error {
 	fmt.Fprintln(out, state.RenderRoom())
 
 	for {
-		contents, err := g.GetDirContents(state.Path, "")
+		contents, err := g.GetDirContents(state.Path, state.SHA)
 		if err != nil {
 			panic("TODO handle this")
 		}
 		state.Contents = contents
-		state.SHA = contents.SHA
 		cmd, err = repl.NextCommand()
 		if err != nil {
 			if uce, ok := err.(*UnknownCommandError); ok {
@@ -139,11 +185,28 @@ func _main(opts *Opts) error {
 		if cmd.Kind == ShiftCommand {
 			switch cmd.Args[0] {
 			case "back":
-				fmt.Fprintf(out, "you close your eyes and focus on the past. you feel as though things have changed around you.")
-				state.ReverseSHA()
+				fmt.Fprintln(out, "you close your eyes and focus on the past. ")
+				prevSHA, err := g.GetPrevSHA(state.Path, state.SHA)
+				if err != nil {
+					panic("TODO Deal with this")
+				}
+
+				state.SHA = prevSHA
+
+				fmt.Fprintln(out, "you feel as though things have changed around you.")
+
 			case "forward":
-				fmt.Fprintf(out, "you close your eyes and focus on the future. you feel as though things have changed around you.")
-				state.ForwardSHA()
+				fmt.Fprintf(out, "you close your eyes and focus on the future.")
+
+				// TODO
+				// - do we need to hit the API? if we do, how do we ask for newer commits? the API wants a commit to start from.
+				// - we could keep track of past SHAs, but this won't help in this case:
+				// - shift backwards
+				// - descend into a directory
+				// - (do we know at what sha that directory is? i suppose the contents dir listing should give us that)
+				// - run shift forward - how to ask for newer commit from API?
+
+				fmt.Fprintln(out, "you feel as though things have changed around you.")
 			default:
 				panic("you shouldn't be here")
 			}
